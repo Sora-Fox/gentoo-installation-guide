@@ -1,0 +1,446 @@
+#+title: Gentoo installation
+#+author: Fox
+
+** Foreword
+This is an installation guide for Gentoo on AMD64 with UEFI, LVM on top of LUKS, the distribution kernel, OpenRC, Dracut, and GRUB.
+
+*Sources*:
+- [[https://wiki.gentoo.org/wiki/Handbook:AMD64][Gentoo AMD64 Handbook]]
+- [[https://wiki.gentoo.org/wiki/Full_Disk_Encryption_From_Scratch][Full Disk Encryption From Scratch]]
+- [[https://wiki.gentoo.org/wiki/Dracut][Dracut]]
+- [[https://wiki.gentoo.org/wiki/LVM][LVM]]
+- [[https://wiki.gentoo.org/wiki/Xorg/Guide][Xorg/Guide]]
+- [[https://wiki.gentoo.org/wiki/Non_root_Xorg][Non root Xorg]]
+- [[https://wiki.gentoo.org/wiki/Dwm][dwm]]
+- [[https://wiki.gentoo.org/wiki/PipeWire][PipeWire]]
+- [[https://wiki.gentoo.org/wiki/Bluetooth][Bluetooth]]
+
+** Configuring the network
+Prefer a wired Ethernet connection; the network is usually configured automatically. Verify connectivity:
+
+#+begin_src shell
+  ping -c3 1.1.1.1
+  ping -c3 gentoo.org 
+#+end_src
+
+If using Wi‑Fi, configure wpa_supplicant/NetworkManager.
+
+** Preparing the disks
+
+#+begin_src shell
+  lsblk
+  cfdisk /dev/nvme0n1
+#+end_src
+
+| Partition      | Size  | Type             |
+|----------------+-------+------------------|
+| /dev/nvme0n1p1 | 512M  | EFI System       |
+| /dev/nvme0n1p2 | 1024M | Linux Filesystem |
+| /dev/nvme0n1p3 | Rest  | Linux Filesystem |
+
+Replace ~cheesecake with~ a descriptive mapper name. Use ~/dev/mapper/cheesecake~ in subsequent LVM commands.
+
+#+begin_src shell
+  cryptsetup luksFormat /dev/nvme0n1p3
+  cryptsetup luksOpen /dev/nvme0n1p3 cheesecake
+#+end_src
+
+Leave free space for snapshots if you plan to use them. It's safer to expand volumes later than to shrink.
+
+#+begin_src shell
+  pvcreate /dev/mapper/cheesecake
+  vgcreate main /dev/mapper/cheesecake
+  lvcreate -L 16G -n swap main
+  lvcreate -L 50G -n home main
+  lvcreate -L 70G -n root main
+#+end_src
+
+Use the ~-T small~ option when creating an ext4 filesystem on a small partition (less than 8 GiB) to reserved enough inodes.
+
+#+begin_src shell
+  mkfs.vfat -F 32 /dev/nvme0n1p1
+  mkfs.ext4 -T small /dev/nvme0n1p2 -L bootfs
+  mkfs.ext4 /dev/main/root -L rootfs
+  mkfs.ext4 /dev/main/home -L homefs
+  mkswap    /dev/main/swap -L swapfs
+#+end_src
+
+#+begin_src shell
+  swapon -L swapfs
+  mount -L rootfs /mnt/gentoo
+#+end_src
+
+** Installing the Gentoo installation files 
+
+#+begin_src shell
+  cd /mnt/gentoo
+  date 123123591999 # MMDDhhmmYYYY (Month, Day, hour, minute and Year)
+  chronyd -q
+#+end_src
+
+Use a desktop stage if you prefer a preconfigured desktop toolchain (contains LLVM, Rust, etc.).
+
+#+begin_src shell
+  links https://www.gentoo.org/downloads/mirrors/
+  tar xpvf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner -C /mnt/gentoo
+#+end_src
+
+On UEFI-capable systems, ensure that ~GRUB_PLATFORMS="efi-64"~ is enabled. If not, add it before emerging GRUB.
+Edit ~/mnt/gentoo/etc/portage/make.conf~ before building packages. Example:
+
+#+begin_src conf 
+  # /mnt/gentoo/etc/portage/make.conf
+  # use resolve-march-native for COMMON_FLAGS: read below
+  COMMON_FLAGS="-march=native -mtune=native -O2 -pipe"
+  CFLAGS="${COMMON_FLAGS}"
+  CXXFLAGS="${COMMON_FLAGS}"
+  RUSTFLAGS="-C target-cpu=native"
+  MAKEOPTS="-j8"
+  GRUB_PLATFORMS="efi-64"
+  USE="bluetooth"
+  PORTAGE_SCHEDULING_POLICY="idle"
+  PORTAGE_NICENESS="15"
+#+end_src
+
+** Installing the Gentoo base system
+
+#+begin_src shell
+  cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+  arch-chroot /mnt/gentoo
+  source /etc/profile && export PS1="(chroot) ${PS1}"
+#+end_src
+
+Create & mount directories:
+
+#+begin_src shell
+  mkdir -p /{home,boot,efi}
+  mount /dev/nvme0n1p1 /efi
+  mount -L bootfs /boot
+  mount -L homefs /home
+#+end_src
+
+Sync Portage and configure mirrors:
+
+#+begin_src shell
+  emerge-webrsync
+  emerge -aqv1 app-portage/mirrorselect
+  mirrorselect -i -o >> /etc/portage/make.conf
+  emerge --sync -q
+  eselect news read
+#+end_src
+
+Use the profile with the same version as the stage file.
+
+#+begin_src shell
+  eselect profile list | less
+  eselect profile set 2 # default/linux/amd64/23.0/desktop
+  emerge --info | grep ^USE
+#+end_src
+
+Set CPU and common flags and update world:
+
+#+begin_src shell
+  emerge -aqv1 app-portage/cpuid2cpuflags app-misc/resolve-march-native
+  echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags
+  echo "COMMON_FLAGS=\"$(resolve-march-native) -O2 -pipe\"" >> /etc/portage/make.conf
+  emerge -aqvuDU @world
+  emerge -aqv app-editors/vim
+  emerge -aqvc
+#+end_src
+
+Timezone and locales:
+
+#+begin_src shell
+  ln -sf ../usr/share/zoneinfo/America/Los_Angeles /etc/localtime
+  echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+  locale-gen
+  eselect locale list
+  eselect locale set 4 # en_US.utf8
+  env-update && source /etc/profile && export PS1="(chroot) ${PS1}"
+#+end_src
+
+** Configuring the Linux kernel
+
+Certain firmware packages require acceptance of the associated licenses. Device
+firmware and AMD microcode are included in the ~sys-kernel/linux-firmware~ package.
+The Intel microcode is in the ~sys-firmware/intel-microcode~ package.
+
+#+begin_src shell
+  mkdir -p /etc/portage/package.license
+  echo "sys-kernel/linux-firmware linux-fw-redistributable" >> /etc/portage/package.license/linux-firmware
+  echo "sys-firmware/intel-microcode intel-ucode" >> /etc/portage/package.license/intel-microcode
+  emerge -aqv sys-kernel/linux-firmware sys-firmware/intel-microcode
+#+end_src
+
+Dracut is an initramfs infrastructure. The ~sys-kernel/installkernel~ package
+automatically regenerates the initramfs via Dracut and the GRUB configuration.
+Before emerging installkernel, the USE flags ~dracut~ and ~grub~ should be set.
+
+#+begin_src shell
+  mkdir -p /etc/portage/package.use
+  echo "sys-kernel/installkernel dracut grub" >> /etc/portage/package.use/installkernel
+  emerge -aqv sys-kernel/installkernel
+  emerge -aqv sys-kernel/gentoo-kernel-bin
+  emerge -aqvc
+#+end_src
+
+Enabling the ~dist-kernel~ USE flag triggers an automatic rebuild for external kernel modules.
+This is highly recommended when using a distribution kernel.
+
+Create Dracut configs for microcode, LUKS and LVM. Replace ~<UUID>~ with the actual UUID of ~/dev/nvme0n1p3~ from blkid:
+
+#+begin_src conf
+  # /etc/dracut.conf.d/00-microcode.conf
+  early_microcode="yes"
+
+  # /etc/dracut.conf.d/10-luks.conf
+  add_dracutmodules+=" crypt dm "
+  kernel_cmdline+=" rd.luks.uuid=<UUID> "
+  kernel_cmdline+=" root=LABEL=rootfs "
+  kernel_cmdline+=" rd.luks.allow-discards "
+  kernel_cmdline+=" rd.luks.name=<UUID>=cheesecake "
+
+  # /etc/dracut.conf.d/20-lvm.conf
+  add_dracutmodules+=" lvm "
+  kernel_cmdline+=" rd.lvm.vg=main "
+#+end_src
+
+Generate the initramfs for the installed kernel version:
+
+#+begin_src shell
+  echo "sys-fs/lvm2 lvm" >> /etc/portage/package.use/lvm
+  emerge -aqv sys-fs/lvm2 sys-fs/cryptsetup
+  dracut --kver $(ls /lib/modules/) -f
+#+end_src
+
+** Configuring the system. Installing system tools
+
+Optional: [[https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Tools#Optional:_Cron_daemon][cron daemon]],
+[[https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Tools#Optional:_File_indexing][file indexing]],
+[[https://wiki.gentoo.org/wiki/Handbook:AMD64/Installation/Tools#Optional:_Remote_shell_access][remote shell access]]
+
+#+begin_src shell
+  emerge -aqv1 sys-fs/genfstab
+  emerge -aqv net-misc/dhcpcd \
+         app-admin/sysklogd \
+         net-misc/chrony
+#+end_src
+
+UUIDs and LABELs of the filesystem on a LVM volume and its LVM snapshots are identical. Don't use UUIDs and LABELs to mount LVM volumes.
+You can create fstab using ~genfstab~ utility (~genfstab / > /etc/fstab~, use ~-L~ for LABELs and ~-U~ for UUIDs).
+Exmaple:
+
+#+begin_src conf
+  # /etc/fstab
+  /dev/mapper/main-root /           ext4        rw,relatime 0 1
+  LABEL=bootfs          /boot       ext4        rw,relatime 0 2
+  /dev/mapper/main-home /home       ext4        rw,relatime 0 2
+  UUID=9147-E643        /efi        vfat        rw,relatime,umask=0077,tz=UTC 0 2
+  /dev/mapper/main-swap none        swap        defaults    0 0
+#+end_src
+
+Set hostname and root password:
+
+#+begin_src shell
+  echo tux > /etc/hostname
+  passwd
+#+end_src
+
+Enable and start services:
+
+#+begin_src shell
+  rc-service dhcpcd start
+  rc-update add lvm boot
+  rc-update add dhcpcd default
+  rc-update add sysklogd default
+  rc-update add chronyd default
+#+end_src
+
+Install NVMe scheduler rules if needed and wireless tools (~iw~, ~wpa_supplicant~) when using Wi‑Fi.
+
+#+begin_src shell
+  emerge -aqv sys-block/io-scheduler-udev-rules
+  emerge -aqv net-wireless/iw net-wireless/wpa_supplicant
+#+end_src
+
+** Configuring the bootloader
+
+#+begin_src shell
+  emerge -aqv sys-boot/grub
+  grub-install --efi-directory=/efi
+  grub-mkconfig -o /boot/grub/grub.cfg
+#+end_src
+
+Exit and reboot:
+
+#+begin_src shell
+  exit
+  cd
+  umount -R /mnt/gentoo
+  swapoff -a
+  reboot
+#+end_src
+
+** Finalizing the installation
+
+After first login remove the stage tarball and install user packages and shells:
+
+#+begin_src shell
+  rm /stage3-*.tar.*
+
+  emerge -aqv app-admin/sudo \
+         app-shells/zsh \
+         app-shells/zsh-completions \
+         app-shells/gentoo-zsh-completions
+
+  useradd -m -G users,wheel,audio,video -s /bin/zsh larry
+  passwd larry
+  EDITOR=vim visudo
+#+end_src
+
+** X11, dwm and user environment
+
+Install X11 and user applications:
+
+#+begin_src shell
+  emerge -aqv x11-base/xorg-server \
+         x11-apps/setxkbmap \
+         x11-apps/xsetroot \
+         x11-apps/xinit \
+         x11-terms/alacritty \
+         x11-misc/dmenu \
+         x11-misc/dunst \
+         x11-misc/xclip \
+         x11-misc/redshift \
+         media-gfx/flameshot \
+         media-gfx/feh \
+         media-fonts/source-code-pro
+
+  git clone https://github.com/Sora-fox/dwm.git dwm
+  cd dwm && make install -j5
+#+end_src
+
+Example ~${HOME}/.xinirc~ (executable):
+
+#+begin_src conf
+  # ~/.xinirc
+  # must be executable
+  exec dbus-launch --sh-syntax --exit-with-session dwm
+#+end_src
+
+Start and enable logind and dbus services:
+
+#+begin_src shell
+  rc-service elogind start
+  rc-service dbus start
+  rc-update add elogind default
+  rc-update add dbus default
+  startx # ensuer that user in video group
+#+end_src
+
+Touchpad configuration example:
+
+#+begin_src conf
+  # /etc/X11/xorg.conf.d/40-libinput.conf
+  Section "InputClass"
+      Identifier "libinput touchpad"
+      MatchIsTouchpad "on"
+      Driver "libinput"
+      Option "Tapping" "on"
+      Option "NaturalScrolling" "true"
+  EndSection
+#+end_src
+
+** Wirless network
+
+#+begin_src shell
+  ip link
+  ip link show wlp2s0
+  ip link set wlp2s0 up
+  iw wlp2s0 link
+  iw wlp2s0 scan
+
+  wpa_passphrase "ssid" "password" >> /etc/wpa_supplicant/wpa_supplicant.conf
+  chown root /etc/wpa_supplicant/wpa_supplicant.conf
+  chgrp root /etc/wpa_supplicant/wpa_supplicant.conf
+  chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
+#+end_src
+
+Direct connect
+
+#+begin_src shell
+  wpa_supplicant -i wlp2s0 -c /etc/wpa_supplicant/wpa_supplicant.conf -B
+#+end_src
+
+Setup for dhcpcd as network manager
+
+#+begin_src conf
+  # /etc/conf.d/wpa_supplicant
+  wpa_supplicant_args="-B -M -c /etc/wpa_supplicant/wpa_supplicant.conf"
+#+end_src
+
+#+begin_src shell
+  rc-update add wpa_supplicant default
+  rc-service wpa_supplicant start
+#+end_src
+
+
+** Bluetooth, audio and extra apps
+
+Bluetooth:
+
+#+begin_src shell
+  emerge -avq net-wireless/bluez
+  rc-service bluetooth start
+  rc-update add bluetooth default
+  rfkill unblock bluetooth
+  bluetoothctl # then: power on; scan on; pair <MAC>
+#+end_src
+
+PipeWire (sound server):
+
+#+begin_src shell
+  echo "media-video/pipewire sound-server" >> /ect/portage/package.use/pipewire
+  emerge -aqv media-video/pipewire media-video/wireplumber
+  emerge -avq media-sound/pavucontrol-qt # GUI settings
+#+end_src
+
+Add ~gentoo-pipewire-launcher &~ to xinitrc before dwm launching
+
+Install necessary software: [[https://wiki.gentoo.org/wiki/Recommended_applications][some recommended applications]].
+Useful utilities and developer packages:
+
+#+begin_src shell
+  emerge -aqv www-client/firefox-bin \
+         net-im/telegram-desktop \
+         app-admin/keepassxc
+
+  emerge -aqv sys-apps/lm-sensors \
+         sys-fs/ncdu \
+         net-misc/openssh \
+         app-admin/stow \
+         app-misc/fastfetch \
+         app-portage/gentoolkit 
+
+  emerge -aqv app-editors/emacs \
+         dev-util/bear \
+         dev-util/ccls \
+         dev-libs/boost \
+         dev-cpp/gtest \
+         dev-debug/valgrind \
+         llvm-core/lldb
+#+end_src
+
+** Miscellaneous
+
+Change consolefont:
+
+#+begin_src shell
+  emerge -avq media-fonts/terminus-font
+  eselect fontconfig list
+  eselect fontconfig enable 75-yes-terminux.conf
+  find /usr/share/consolefonts -name "ter*" -type f # choose font or apply temporary via setfont ter-u24n
+  echo consolefont="ter-u24n" >> /etc/conf.d/consolefont
+  rc-update add consolefont boot
+#+end_src
+
