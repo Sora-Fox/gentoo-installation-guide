@@ -134,11 +134,12 @@ Use the profile with the same version as the stage file.
   emerge --info | grep ^USE
 #+end_src
 
-Set CPU flags and update world:
+Set CPU and common flags and update world:
 
 #+begin_src shell
-  emerge -aqv1 app-portage/cpuid2cpuflags
+  emerge -aqv1 app-portage/cpuid2cpuflags app-misc/resolve-march-native
   echo "*/* $(cpuid2cpuflags)" > /etc/portage/package.use/00cpu-flags
+  echo "COMMON_FLAGS=\"$(resolve-march-native) -O2 -pipe\"" >> /etc/portage/make.conf
   emerge -aqvuDU @world
   emerge -aqv app-editors/vim
   emerge -aqvc
