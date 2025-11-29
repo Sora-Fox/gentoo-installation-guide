@@ -90,6 +90,7 @@ Edit ~/mnt/gentoo/etc/portage/make.conf~ before building packages. Example:
 
 #+begin_src conf 
   # /mnt/gentoo/etc/portage/make.conf
+  # use resolve-march-native for COMMON_FLAGS: read below
   COMMON_FLAGS="-march=native -mtune=native -O2 -pipe"
   CFLAGS="${COMMON_FLAGS}"
   CXXFLAGS="${COMMON_FLAGS}"
@@ -97,6 +98,8 @@ Edit ~/mnt/gentoo/etc/portage/make.conf~ before building packages. Example:
   MAKEOPTS="-j8"
   GRUB_PLATFORMS="efi-64"
   USE="bluetooth"
+  PORTAGE_SCHEDULING_POLICY="idle"
+  PORTAGE_NICENESS="15"
 #+end_src
 
 ** Installing the Gentoo base system
@@ -322,14 +325,6 @@ Example ~${HOME}/.xinirc~ (executable):
 #+begin_src conf
   # ~/.xinirc
   # must be executable
-
-  setxkbmap -layout us,ru -option grp:win_space_toggle -option ctrl:nocaps
-  redshift -O 5000
-
-  dunst &
-  dmenu & 
-  flameshot &
-
   exec dbus-launch --sh-syntax --exit-with-session dwm
 #+end_src
 
@@ -364,6 +359,11 @@ Touchpad configuration example:
   ip link set wlp2s0 up
   iw wlp2s0 link
   iw wlp2s0 scan
+
+  wpa_passphrase "ssid" "password" >> /etc/wpa_supplicant/wpa_supplicant.conf
+  chown root /etc/wpa_supplicant/wpa_supplicant.conf
+  chgrp root /etc/wpa_supplicant/wpa_supplicant.conf
+  chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
 #+end_src
 
 Direct connect
@@ -380,10 +380,6 @@ Setup for dhcpcd as network manager
 #+end_src
 
 #+begin_src shell
-  wpa_passphrase "ssid" "password" >> /etc/wpa_supplicant/wpa_supplicant.conf
-  chown root /etc/wpa_supplicant/wpa_supplicant.conf
-  chgrp root /etc/wpa_supplicant/wpa_supplicant.conf
-  chmod 600 /etc/wpa_supplicant/wpa_supplicant.conf
   rc-update add wpa_supplicant default
   rc-service wpa_supplicant start
 #+end_src
